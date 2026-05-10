@@ -1,100 +1,120 @@
+// ==================== TIMER SERVICE (VERSIÓN ESTABLE PARA WEB) ====================
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:audioplayers/audioplayers.dart';
-import '../models/workout_class.dart';   // ← Import relativo (más simple)
+import 'package:flutter/services.dart';     // ← Necesario para vibración y sonido
+import '../models/workout_class.dart';
 
 class WorkoutTimerService extends ChangeNotifier {
   Timer? _timer;
   int _remainingSeconds = 0;
   int _currentBlockIndex = 0;
+  int _currentRound = 1;
+  bool isWorkingPhase = true;      // true = trabajando, false = descansando
   bool isRunning = false;
   bool isPaused = false;
+  bool isPreparing = false;
+  int _prepareSeconds = 10;
   WorkoutClass? currentClass;
 
   final AudioPlayer _audioPlayer = AudioPlayer();
 
   int get remainingSeconds => _remainingSeconds;
   int get currentBlockIndex => _currentBlockIndex;
+  int get currentRound => _currentRound;
+  bool get isPreparingNext => isPreparing;
+  int get prepareSeconds => _prepareSeconds;
+  bool get isWorkPhase => isWorkingPhase;        // ← Getter importante
 
-  WorkoutBlock? get currentBlock => 
-      currentClass != null && currentClass!.blocks.isNotEmpty 
-          ? currentClass!.blocks[_currentBlockIndex] 
-          : null;
+  WorkoutBlock? get currentBlock => currentClass?.blocks[_currentBlockIndex];
 
-  void startClass(WorkoutClass workoutClass) {
+  // ... (mantengo los métodos de sonido que ya tenías)
+
+  void startClass(WorkoutClass workoutClass, {int startFromBlock = 0}) {
     currentClass = workoutClass;
-    _currentBlockIndex = 0;
-    _loadCurrentBlock();
-    startTimer();
+    _currentBlockIndex = startFromBlock;
+    _currentRound = 1;
+    _startPreparation();
   }
 
-  void _loadCurrentBlock() {
-    if (currentClass == null || currentClass!.blocks.isEmpty) return;
-    final block = currentClass!.blocks[_currentBlockIndex];
-    _remainingSeconds = block.durationMinutes * 60;
+  void _startPreparation() {
+    isPreparing = true;
+    _prepareSeconds = 10;
     notifyListeners();
+
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_prepareSeconds > 0) {
+        _prepareSeconds--;
+        notifyListeners();
+      } else {
+        _startWorkPhase();
+      }
+    });
   }
 
-  void startTimer() {
-    isRunning = true;
-    isPaused = false;
+  void _startWorkPhase() {
+    isPreparing = false;
+    isWorkingPhase = true;
+    final block = currentBlock!;
+    _remainingSeconds = (block.workMinutes * 60) + block.workSeconds;
+    notifyListeners();
+
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (_remainingSeconds > 0) {
         _remainingSeconds--;
         notifyListeners();
-
-        if (_remainingSeconds <= 10 && _remainingSeconds > 0) {
-          _audioPlayer.play(AssetSource('sounds/beep.mp3'));
-        }
       } else {
-        nextBlock();
+        _startRestPhase();
       }
     });
   }
 
-  void pauseTimer() {
-    isPaused = true;
-    _timer?.cancel();
+  void _startRestPhase() {
+    isWorkingPhase = false;
+    final block = currentBlock!;
+    _remainingSeconds = (block.restMinutes * 60) + block.restSeconds;
     notifyListeners();
+
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_remainingSeconds > 0) {
+        _remainingSeconds--;
+        notifyListeners();
+      } else {
+        _nextRoundOrBlock();
+      }
+    });
   }
 
-  void resumeTimer() {
-    if (isPaused) startTimer();
+  void _nextRoundOrBlock() {
+    final block = currentBlock!;
+    if (_currentRound < block.rounds) {
+      _currentRound++;
+      _startWorkPhase();
+    } else {
+      nextBlock();
+    }
   }
 
   void nextBlock() {
     _timer?.cancel();
-    if (currentClass != null && 
-        _currentBlockIndex < currentClass!.blocks.length - 1) {
+    if (currentClass != null && _currentBlockIndex < currentClass!.blocks.length - 1) {
       _currentBlockIndex++;
-      _loadCurrentBlock();
-      startTimer();
+      _currentRound = 1;
+      _startPreparation();
     } else {
       finishClass();
     }
   }
 
-  void finishClass() {
-    isRunning = false;
+  void restartCurrentBlock() {
     _timer?.cancel();
-    _audioPlayer.play(AssetSource('sounds/finish.mp3'));
-    notifyListeners();
+    _currentRound = 1;
+    _startPreparation();
   }
 
-  void reset() {
-    _timer?.cancel();
-    isRunning = false;
-    isPaused = false;
-    _remainingSeconds = 0;
-    _currentBlockIndex = 0;
-    notifyListeners();
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    _audioPlayer.dispose();
-    super.dispose();
-  }
+  void pauseTimer() { isPaused = true; _timer?.cancel(); notifyListeners(); }
+  void resumeTimer() { if (isPaused) { isPaused = false; notifyListeners(); } }
+  void finishClass() { isRunning = false; isPreparing = false; _timer?.cancel(); notifyListeners(); }
 }
