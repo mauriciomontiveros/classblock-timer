@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'dart:async';
 import 'package:uuid/uuid.dart';
+import 'package:flutter/services.dart';
 
 // ==================== MODELOS ====================
 enum BlockType { warmUp, strength, metcon, finisher, custom }
@@ -71,22 +72,25 @@ class WorkoutTimerService extends ChangeNotifier {
 
   Future<void> playTestBeep() async {
     try {
-      await _audioPlayer.play(AssetSource('sounds/beep.mp3'), volume: 1.0);
+      HapticFeedback.mediumImpact();
+      await SystemSound.play(SystemSoundType.alert);
       print("✅ Beep OK");
     } catch (e) {
-      print("❌ Error beep: $e");
+      print("❌ Error: $e");
     }
   }
 
   Future<void> _playBeep() async {
     try {
-      await _audioPlayer.play(AssetSource('sounds/beep.mp3'), volume: 0.8);
+      HapticFeedback.mediumImpact();
+      await SystemSound.play(SystemSoundType.alert);
     } catch (e) {}
   }
 
   Future<void> _playFinish() async {
     try {
-      await _audioPlayer.play(AssetSource('sounds/finish.mp3'), volume: 1.0);
+      HapticFeedback.heavyImpact();
+      await SystemSound.play(SystemSoundType.alert);
     } catch (e) {}
   }
 
@@ -180,7 +184,7 @@ class WorkoutTimerService extends ChangeNotifier {
   void finishClass() { isRunning = false; isPreparing = false; _timer?.cancel(); notifyListeners(); }
 }
 
-// ==================== MAIN APP ====================
+// ==================== EL RESTO DE LA APP (Home, ClassBuilder, Editor, LiveTimer) ====================
 void main() => runApp(const MyApp());
 
 class MyApp extends StatelessWidget {
@@ -216,7 +220,8 @@ class HomeScreen extends StatelessWidget {
   }
 }
 
-// ==================== CLASS BUILDER (mantengo el anterior) ====================
+// (ClassBuilderScreen y BlockEditorDialog se mantienen como los últimos que te gustaron)
+
 class ClassBuilderScreen extends StatefulWidget {
   const ClassBuilderScreen({super.key});
   @override
@@ -308,7 +313,7 @@ class _ClassBuilderScreenState extends State<ClassBuilderScreen> {
   }
 }
 
-// ==================== EDITOR (mantengo el anterior que te gustó) ====================
+// BlockEditorDialog (el que te gustó)
 class BlockEditorDialog extends StatefulWidget {
   final WorkoutBlock block;
   final Function(WorkoutBlock) onSave;
@@ -326,7 +331,6 @@ class _BlockEditorDialogState extends State<BlockEditorDialog> {
   late int workSeconds;
   late int restMinutes;
   late int restSeconds;
-  bool hasCountdown = true;
 
   @override
   void initState() {
@@ -406,7 +410,7 @@ class _BlockEditorDialogState extends State<BlockEditorDialog> {
   }
 }
 
-// ==================== LIVE TIMER SCREEN CORREGIDA ====================
+// ==================== LIVE TIMER SCREEN ====================
 class LiveTimerScreen extends StatefulWidget {
   final WorkoutClass workoutClass;
   const LiveTimerScreen({super.key, required this.workoutClass});
@@ -435,46 +439,25 @@ class _LiveTimerScreenState extends State<LiveTimerScreen> {
           padding: const EdgeInsets.all(20),
           child: Column(
             children: [
-              Text(
-                "Bloque ${timer.currentBlockIndex + 1}/${widget.workoutClass.blocks.length}",
-                style: const TextStyle(fontSize: 18, color: Colors.grey),
-              ),
-              Text(
-                block?.name ?? "",
-                style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
-                textAlign: TextAlign.center,
-              ),
+              Text("Bloque ${timer.currentBlockIndex + 1}/${widget.workoutClass.blocks.length}"),
+              Text(block?.name ?? "", style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
 
               const Spacer(),
 
-              // ==================== CUENTA REGRESIVA ====================
               if (timer.isPreparingNext)
                 Column(
                   children: [
-                    const Text(
-                      "¡PREPÁRATE!",
-                      style: TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.orange),
-                    ),
-                    const SizedBox(height: 20),
-                    Text(
-                      "${timer.prepareSeconds}",
-                      style: const TextStyle(fontSize: 140, fontWeight: FontWeight.bold, color: Colors.orange),
-                    ),
+                    const Text("¡PREPÁRATE!", style: TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.orange)),
+                    Text("${timer.prepareSeconds}", style: const TextStyle(fontSize: 140, fontWeight: FontWeight.bold, color: Colors.orange)),
                   ],
                 )
-              // ==================== TEMPORIZADOR NORMAL ====================
               else
                 Column(
                   children: [
                     Text(
                       timer.isWorkPhase ? "TRABAJANDO" : "DESCANSANDO",
-                      style: TextStyle(
-                        fontSize: 32,
-                        fontWeight: FontWeight.bold,
-                        color: timer.isWorkPhase ? Colors.green : Colors.orange,
-                      ),
+                      style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: timer.isWorkPhase ? Colors.green : Colors.orange),
                     ),
-                    const SizedBox(height: 10),
                     Text(
                       formatTime(timer.remainingSeconds),
                       style: const TextStyle(fontSize: 135, fontWeight: FontWeight.bold, color: Colors.deepOrange),
@@ -483,22 +466,12 @@ class _LiveTimerScreenState extends State<LiveTimerScreen> {
                 ),
 
               const SizedBox(height: 20),
+              Text("Ronda ${timer.currentRound} de ${block?.rounds ?? 1}", style: const TextStyle(fontSize: 24)),
 
-              // Ronda
-              Text(
-                "Ronda ${timer.currentRound} de ${block?.rounds ?? 1}",
-                style: const TextStyle(fontSize: 26, color: Colors.white),
-              ),
-
-              // Ejercicios
               if (block?.exercises.isNotEmpty ?? false)
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 20),
-                  child: Text(
-                    block!.exercises.join(" • "),
-                    style: const TextStyle(fontSize: 18, color: Colors.white70),
-                    textAlign: TextAlign.center,
-                  ),
+                  child: Text(block!.exercises.join(" • "), style: const TextStyle(fontSize: 18, color: Colors.white70)),
                 ),
 
               const Spacer(),
@@ -508,13 +481,9 @@ class _LiveTimerScreenState extends State<LiveTimerScreen> {
                 children: [
                   ElevatedButton.icon(
                     onPressed: () {
-                      if (!timer.isRunning) {
-                        timer.startClass(widget.workoutClass);
-                      } else if (timer.isPaused) {
-                        timer.resumeTimer();
-                      } else {
-                        timer.pauseTimer();
-                      }
+                      if (!timer.isRunning) timer.startClass(widget.workoutClass);
+                      else if (timer.isPaused) timer.resumeTimer();
+                      else timer.pauseTimer();
                     },
                     icon: Icon(timer.isRunning && !timer.isPaused ? Icons.pause : Icons.play_arrow),
                     label: Text(timer.isRunning && !timer.isPaused ? "Pausar" : "Iniciar"),
