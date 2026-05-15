@@ -3,19 +3,42 @@ import 'package:provider/provider.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'dart:async';
 import 'package:uuid/uuid.dart';
+import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/services.dart';
 
 // ==================== MODELOS ====================
 enum BlockType { warmUp, strength, metcon, finisher, custom }
-enum TimerType { forTime, amrap, emom, tabata }
 
 class WorkoutClass {
   final String id;
   final String name;
   final List<WorkoutBlock> blocks;
+  final DateTime createdAt;
 
-  WorkoutClass({String? id, required this.name, required this.blocks})
-      : id = id ?? const Uuid().v4();
+  WorkoutClass({
+    String? id,
+    required this.name,
+    required this.blocks,
+    DateTime? createdAt,
+  })  : id = id ?? const Uuid().v4(),
+        createdAt = createdAt ?? DateTime.now();
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'blocks': blocks.map((b) => b.toJson()).toList(),
+        'createdAt': createdAt.toIso8601String(),
+      };
+
+  factory WorkoutClass.fromJson(Map<String, dynamic> json) => WorkoutClass(
+        id: json['id'],
+        name: json['name'],
+        blocks: (json['blocks'] as List)
+            .map((b) => WorkoutBlock.fromJson(b))
+            .toList(),
+        createdAt: DateTime.parse(json['createdAt']),
+      );
 }
 
 class WorkoutBlock {
@@ -24,7 +47,6 @@ class WorkoutBlock {
   final int durationMinutes;
   final BlockType blockType;
   final List<String> exercises;
-
   final int rounds;
   final int workMinutes;
   final int workSeconds;
@@ -44,9 +66,35 @@ class WorkoutBlock {
     this.restSeconds = 0,
   })  : id = id ?? const Uuid().v4(),
         exercises = exercises ?? [];
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'durationMinutes': durationMinutes,
+        'blockType': blockType.toString(),
+        'exercises': exercises,
+        'rounds': rounds,
+        'workMinutes': workMinutes,
+        'workSeconds': workSeconds,
+        'restMinutes': restMinutes,
+        'restSeconds': restSeconds,
+      };
+
+  factory WorkoutBlock.fromJson(Map<String, dynamic> json) => WorkoutBlock(
+        id: json['id'],
+        name: json['name'],
+        durationMinutes: json['durationMinutes'],
+        blockType: BlockType.values.firstWhere((e) => e.toString() == json['blockType']),
+        exercises: List<String>.from(json['exercises'] ?? []),
+        rounds: json['rounds'] ?? 4,
+        workMinutes: json['workMinutes'] ?? 3,
+        workSeconds: json['workSeconds'] ?? 0,
+        restMinutes: json['restMinutes'] ?? 1,
+        restSeconds: json['restSeconds'] ?? 0,
+      );
 }
 
-// ==================== TIMER SERVICE ====================
+// ==================== TIMER SERVICE CON SONIDOS (VERSIÓN DIAGNÓSTICO) ====================
 class WorkoutTimerService extends ChangeNotifier {
   Timer? _timer;
   int _remainingSeconds = 0;
@@ -70,34 +118,37 @@ class WorkoutTimerService extends ChangeNotifier {
 
   WorkoutBlock? get currentBlock => currentClass?.blocks[_currentBlockIndex];
 
-  Future<void> playTestBeep() async {
+  Future<void> _playShortBeep() async {
     try {
-      HapticFeedback.mediumImpact();
-      await SystemSound.play(SystemSoundType.alert);
-      print("✅ Beep OK");
+      print("🔊 Intentando reproducir beep corto...");
+      await _audioPlayer.play(AssetSource('sounds/beep.mp3'));
+      print("✅ Beep corto reproducido");
     } catch (e) {
-      print("❌ Error: $e");
+      print("❌ Error beep corto: $e");
     }
   }
 
-  Future<void> _playBeep() async {
+  Future<void> _playLongBeep() async {
     try {
-      HapticFeedback.mediumImpact();
-      await SystemSound.play(SystemSoundType.alert);
-    } catch (e) {}
+      print("🔊 Intentando reproducir beep largo...");
+      await _audioPlayer.play(AssetSource('sounds/finish.mp3'));
+      print("✅ Beep largo reproducido");
+    } catch (e) {
+      print("❌ Error beep largo: $e");
+    }
   }
 
-  Future<void> _playFinish() async {
-    try {
-      HapticFeedback.heavyImpact();
-      await SystemSound.play(SystemSoundType.alert);
-    } catch (e) {}
+  Future<void> playTestBeep() async {
+    print("🧪 Botón de prueba presionado");
+    await _playShortBeep();
   }
 
   void startClass(WorkoutClass workoutClass, {int startFromBlock = 0}) {
     currentClass = workoutClass;
     _currentBlockIndex = startFromBlock;
     _currentRound = 1;
+    isRunning = true;
+    isPaused = false;
     _startPreparation();
   }
 
@@ -110,6 +161,8 @@ class WorkoutTimerService extends ChangeNotifier {
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (_prepareSeconds > 0) {
         _prepareSeconds--;
+        if (_prepareSeconds <= 3 && _prepareSeconds > 0) _playShortBeep();
+        if (_prepareSeconds == 0) _playLongBeep();
         notifyListeners();
       } else {
         _startWorkPhase();
@@ -123,16 +176,7 @@ class WorkoutTimerService extends ChangeNotifier {
     final block = currentBlock!;
     _remainingSeconds = (block.workMinutes * 60) + block.workSeconds;
     notifyListeners();
-
-    _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (_remainingSeconds > 0) {
-        _remainingSeconds--;
-        notifyListeners();
-      } else {
-        _startRestPhase();
-      }
-    });
+    _startTimer();
   }
 
   void _startRestPhase() {
@@ -140,14 +184,30 @@ class WorkoutTimerService extends ChangeNotifier {
     final block = currentBlock!;
     _remainingSeconds = (block.restMinutes * 60) + block.restSeconds;
     notifyListeners();
+    _startTimer();
+  }
 
+  void _startTimer() {
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (_remainingSeconds > 0) {
         _remainingSeconds--;
+        
+        // Beep en los últimos 3 segundos de cada fase
+        if (_remainingSeconds <= 3 && _remainingSeconds > 0) {
+          _playShortBeep();
+        }
+        if (_remainingSeconds == 0) {
+          _playLongBeep();
+        }
+        
         notifyListeners();
       } else {
-        _nextRoundOrBlock();
+        if (isWorkingPhase) {
+          _startRestPhase();
+        } else {
+          _nextRoundOrBlock();
+        }
       }
     });
   }
@@ -179,12 +239,62 @@ class WorkoutTimerService extends ChangeNotifier {
     _startPreparation();
   }
 
-  void pauseTimer() { isPaused = true; _timer?.cancel(); notifyListeners(); }
-  void resumeTimer() { if (isPaused) { isPaused = false; notifyListeners(); } }
-  void finishClass() { isRunning = false; isPreparing = false; _timer?.cancel(); notifyListeners(); }
+  void pauseTimer() {
+    isPaused = true;
+    _timer?.cancel();
+    notifyListeners();
+  }
+
+  void resumeTimer() {
+    if (!isPaused) return;
+    isPaused = false;
+    notifyListeners();
+    _startTimer();
+  }
+
+  void finishClass() {
+    isRunning = false;
+    isPaused = false;
+    isPreparing = false;
+    _timer?.cancel();
+    _playLongBeep(); // Sonido final de clase
+    notifyListeners();
+  }
+
+      void stopAllSounds() {
+    try {
+      _audioPlayer.stop();      // Detiene el sonido actual
+      _audioPlayer.release();   // Libera los recursos de audio
+      print("🔇 Sonidos detenidos");
+    } catch (e) {
+      print("Error al detener sonidos: $e");
+    }
+  }
 }
 
-// ==================== EL RESTO DE LA APP (Home, ClassBuilder, Editor, LiveTimer) ====================
+// ==================== SERVICIO DE GUARDADO ====================
+class ClassStorageService {
+  static const String _key = 'saved_classes';
+
+  static Future<void> saveClasses(List<WorkoutClass> classes) async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String> jsonList = classes.map((c) => jsonEncode(c.toJson())).toList();
+    await prefs.setStringList(_key, jsonList);
+  }
+
+  static Future<List<WorkoutClass>> loadClasses() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String>? jsonList = prefs.getStringList(_key);
+    if (jsonList == null || jsonList.isEmpty) return [];
+
+    return jsonList.map((jsonStr) {
+      final Map<String, dynamic> map = jsonDecode(jsonStr);
+      return WorkoutClass.fromJson(map);
+    }).toList();
+  }
+}
+
+// ==================== MAIN APP ====================
 void main() => runApp(const MyApp());
 
 class MyApp extends StatelessWidget {
@@ -203,34 +313,87 @@ class MyApp extends StatelessWidget {
   }
 }
 
+// ==================== HOME SCREEN - ACTUALIZADO ====================
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('ClassBlock Timer')),
       body: Center(
-        child: ElevatedButton.icon(
-          icon: const Icon(Icons.add, size: 30),
-          label: const Text("Crear Nueva Clase", style: TextStyle(fontSize: 18)),
-          onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ClassBuilderScreen())),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            ElevatedButton.icon(
+              icon: const Icon(Icons.add, size: 30),
+              label: const Text("Crear Nueva Clase", style: TextStyle(fontSize: 18)),
+              onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ClassBuilderScreen())),
+            ),
+            const SizedBox(height: 16),
+
+            ElevatedButton.icon(
+              icon: const Icon(Icons.folder_open, size: 30),
+              label: const Text("Mis Clases Guardadas", style: TextStyle(fontSize: 18)),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[800]),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const SavedClassesScreen(),
+                  settings: const RouteSettings(name: 'SavedClasses'),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // ==================== NUEVO BOTÓN ====================
+            ElevatedButton.icon(
+              icon: const Icon(Icons.text_snippet, size: 30),
+              label: const Text("Importar Rutina desde Texto", style: TextStyle(fontSize: 18)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.purple[700],
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+              ),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const ImportRoutineScreen()),
+              ),
+            ),
+          ],
         ),
       ),
     );
   }
 }
 
-// (ClassBuilderScreen y BlockEditorDialog se mantienen como los últimos que te gustaron)
-
+// ==================== CLASS BUILDER - VERSIÓN COMPLETA Y CORREGIDA ====================
 class ClassBuilderScreen extends StatefulWidget {
-  const ClassBuilderScreen({super.key});
+  final WorkoutClass? existingClass;
+  final int? classIndex;           // Para saber si estamos editando
+
+  const ClassBuilderScreen({
+    super.key,
+    this.existingClass,
+    this.classIndex,
+  });
+
   @override
   State<ClassBuilderScreen> createState() => _ClassBuilderScreenState();
 }
 
 class _ClassBuilderScreenState extends State<ClassBuilderScreen> {
-  final TextEditingController _className = TextEditingController(text: "Clase de Hoy");
+  late TextEditingController _className;
   List<WorkoutBlock> blocks = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _className = TextEditingController(text: widget.existingClass?.name ?? "Clase de Hoy");
+
+    if (widget.existingClass != null) {
+      blocks = List.from(widget.existingClass!.blocks);
+    }
+  }
 
   void _addNewBlock() {
     setState(() {
@@ -253,15 +416,62 @@ class _ClassBuilderScreenState extends State<ClassBuilderScreen> {
     );
   }
 
+    void _saveCurrentClass() async {
+    if (blocks.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Agrega al menos un bloque")),
+      );
+      return;
+    }
+
+    final newWorkout = WorkoutClass(
+      name: _className.text,
+      blocks: List.from(blocks),
+    );
+
+    List<WorkoutClass> allSaved = await ClassStorageService.loadClasses();
+
+    if (widget.classIndex != null && widget.classIndex! < allSaved.length) {
+      // EDITAR clase existente
+      allSaved[widget.classIndex!] = newWorkout;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("✅ Clase actualizada correctamente")),
+      );
+    } else {
+      // NUEVA clase
+      allSaved.add(newWorkout);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("✅ Clase guardada correctamente")),
+      );
+    }
+
+    await ClassStorageService.saveClasses(allSaved);
+
+    // Volver directamente a la pantalla de inicio
+    Navigator.popUntil(context, (route) => route.isFirst);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Crear Clase')),
+      appBar: AppBar(
+        title: const Text('Crear / Editar Clase'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.save, size: 28),
+            tooltip: "Guardar Clase",
+            onPressed: _saveCurrentClass,
+          ),
+        ],
+      ),
       body: Column(
         children: [
           Padding(
             padding: const EdgeInsets.all(16),
-            child: TextField(controller: _className, decoration: const InputDecoration(labelText: "Nombre de la Clase")),
+            child: TextField(
+              controller: _className,
+              decoration: const InputDecoration(labelText: "Nombre de la Clase"),
+            ),
           ),
           Expanded(
             child: ReorderableListView.builder(
@@ -277,10 +487,11 @@ class _ClassBuilderScreenState extends State<ClassBuilderScreen> {
                 final b = blocks[index];
                 return Card(
                   key: ValueKey(b.id),
+                  margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   child: ListTile(
                     leading: const Icon(Icons.drag_handle),
                     title: Text(b.name),
-                    subtitle: Text("${b.durationMinutes} min"),
+                    subtitle: Text("${b.durationMinutes} minutos", style: const TextStyle(color: Colors.grey)),
                     onTap: () => _editBlock(index),
                   ),
                 );
@@ -291,7 +502,13 @@ class _ClassBuilderScreenState extends State<ClassBuilderScreen> {
             padding: const EdgeInsets.all(16),
             child: Row(
               children: [
-                Expanded(child: ElevatedButton.icon(icon: const Icon(Icons.add), label: const Text("Agregar Bloque"), onPressed: _addNewBlock)),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.add),
+                    label: const Text("Agregar Bloque"),
+                    onPressed: _addNewBlock,
+                  ),
+                ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: ElevatedButton.icon(
@@ -300,7 +517,10 @@ class _ClassBuilderScreenState extends State<ClassBuilderScreen> {
                     style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
                     onPressed: blocks.isEmpty ? null : () {
                       final workout = WorkoutClass(name: _className.text, blocks: blocks);
-                      Navigator.push(context, MaterialPageRoute(builder: (_) => LiveTimerScreen(workoutClass: workout)));
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => LiveTimerScreen(workoutClass: workout)),
+                      );
                     },
                   ),
                 ),
@@ -313,7 +533,7 @@ class _ClassBuilderScreenState extends State<ClassBuilderScreen> {
   }
 }
 
-// BlockEditorDialog (el que te gustó)
+// ==================== EDITOR DE BLOQUE ====================
 class BlockEditorDialog extends StatefulWidget {
   final WorkoutBlock block;
   final Function(WorkoutBlock) onSave;
@@ -353,33 +573,34 @@ class _BlockEditorDialogState extends State<BlockEditorDialog> {
           mainAxisSize: MainAxisSize.min,
           children: [
             TextField(controller: nameController, decoration: const InputDecoration(labelText: "Nombre del Bloque")),
+            const SizedBox(height: 16),
             TextField(
               controller: exercisesController,
               decoration: const InputDecoration(labelText: "Ejercicios (uno por línea)"),
               maxLines: 4,
             ),
             const SizedBox(height: 20),
-            const Text("Rondas"),
-            Slider(value: rounds.toDouble(), min: 1, max: 20, onChanged: (v) => setState(() => rounds = v.toInt())),
+            const Text("Rondas", style: TextStyle(fontWeight: FontWeight.bold)),
+            Slider(value: rounds.toDouble(), min: 1, max: 20, divisions: 19, onChanged: (v) => setState(() => rounds = v.toInt())),
             Text("$rounds rondas"),
 
             const SizedBox(height: 16),
-            const Text("Trabajar"),
+            const Text("Trabajar", style: TextStyle(fontWeight: FontWeight.bold)),
             Row(
               children: [
-                Expanded(child: TextField(decoration: const InputDecoration(labelText: "Min"), keyboardType: TextInputType.number, onChanged: (v) => workMinutes = int.tryParse(v) ?? 0, controller: TextEditingController(text: workMinutes.toString()))),
+                Expanded(child: TextField(decoration: const InputDecoration(labelText: "Minutos"), keyboardType: TextInputType.number, onChanged: (v) => workMinutes = int.tryParse(v) ?? 0, controller: TextEditingController(text: workMinutes.toString()))),
                 const SizedBox(width: 8),
-                Expanded(child: TextField(decoration: const InputDecoration(labelText: "Seg"), keyboardType: TextInputType.number, onChanged: (v) => workSeconds = int.tryParse(v) ?? 0, controller: TextEditingController(text: workSeconds.toString()))),
+                Expanded(child: TextField(decoration: const InputDecoration(labelText: "Segundos"), keyboardType: TextInputType.number, onChanged: (v) => workSeconds = int.tryParse(v) ?? 0, controller: TextEditingController(text: workSeconds.toString()))),
               ],
             ),
 
             const SizedBox(height: 16),
-            const Text("Descansar"),
+            const Text("Descansar", style: TextStyle(fontWeight: FontWeight.bold)),
             Row(
               children: [
-                Expanded(child: TextField(decoration: const InputDecoration(labelText: "Min"), keyboardType: TextInputType.number, onChanged: (v) => restMinutes = int.tryParse(v) ?? 0, controller: TextEditingController(text: restMinutes.toString()))),
+                Expanded(child: TextField(decoration: const InputDecoration(labelText: "Minutos"), keyboardType: TextInputType.number, onChanged: (v) => restMinutes = int.tryParse(v) ?? 0, controller: TextEditingController(text: restMinutes.toString()))),
                 const SizedBox(width: 8),
-                Expanded(child: TextField(decoration: const InputDecoration(labelText: "Seg"), keyboardType: TextInputType.number, onChanged: (v) => restSeconds = int.tryParse(v) ?? 0, controller: TextEditingController(text: restSeconds.toString()))),
+                Expanded(child: TextField(decoration: const InputDecoration(labelText: "Segundos"), keyboardType: TextInputType.number, onChanged: (v) => restSeconds = int.tryParse(v) ?? 0, controller: TextEditingController(text: restSeconds.toString()))),
               ],
             ),
           ],
@@ -389,9 +610,12 @@ class _BlockEditorDialogState extends State<BlockEditorDialog> {
         TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancelar")),
         TextButton(
           onPressed: () {
+            final totalSeconds = (workMinutes * 60 + workSeconds) + (restMinutes * 60 + restSeconds);
+            final totalDurationMinutes = (totalSeconds * rounds) ~/ 60;
+
             final newBlock = WorkoutBlock(
               name: nameController.text,
-              durationMinutes: 10,
+              durationMinutes: totalDurationMinutes,
               blockType: widget.block.blockType,
               exercises: exercisesController.text.split('\n').where((e) => e.trim().isNotEmpty).toList(),
               rounds: rounds,
@@ -410,20 +634,295 @@ class _BlockEditorDialogState extends State<BlockEditorDialog> {
   }
 }
 
-// ==================== LIVE TIMER SCREEN ====================
+// ==================== MIS CLASES GUARDADAS - REFRESH FORZADO ====================
+class SavedClassesScreen extends StatefulWidget {
+  const SavedClassesScreen({super.key});
+  @override
+  State<SavedClassesScreen> createState() => _SavedClassesScreenState();
+}
+
+class _SavedClassesScreenState extends State<SavedClassesScreen> {
+  List<WorkoutClass> savedClasses = [];
+  final GlobalKey<RefreshIndicatorState> _refreshKey = GlobalKey<RefreshIndicatorState>();
+
+  @override
+  void initState() {
+    super.initState();
+    _loadClasses();
+  }
+
+  Future<void> _loadClasses() async {
+    savedClasses = await ClassStorageService.loadClasses();
+    setState(() {});
+  }
+
+  void _openClassDetail(WorkoutClass workout, int index) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ClassDetailScreen(
+          workoutClass: workout,
+          classIndex: index,
+        ),
+      ),
+    ).then((_) {
+      _loadClasses();           // Refresh al volver
+    });
+  }
+
+  void _deleteClass(int index) async {
+    savedClasses.removeAt(index);
+    await ClassStorageService.saveClasses(savedClasses);
+    setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Mis Clases Guardadas'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _loadClasses,
+          ),
+        ],
+      ),
+      body: RefreshIndicator(
+        key: _refreshKey,
+        onRefresh: _loadClasses,
+        child: savedClasses.isEmpty
+            ? const Center(
+                child: Text(
+                  "Aún no tienes clases guardadas",
+                  style: TextStyle(fontSize: 18, color: Colors.grey),
+                ),
+              )
+            : ListView.builder(
+                itemCount: savedClasses.length,
+                itemBuilder: (context, index) {
+                  final cls = savedClasses[index];
+                  return Card(
+                    margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    child: ListTile(
+                      title: Text(cls.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                      subtitle: Text(
+                        "${cls.blocks.length} bloques • ${cls.createdAt.day}/${cls.createdAt.month}/${cls.createdAt.year}",
+                      ),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.delete, color: Colors.red),
+                        onPressed: () => _deleteClass(index),
+                      ),
+                      onTap: () => _openClassDetail(cls, index),
+                    ),
+                  );
+                },
+              ),
+      ),
+    );
+  }
+}
+
+// ==================== DETALLE DE CLASE - CON EJERCICIOS Y TIMER FUNCIONAL ====================
+class ClassDetailScreen extends StatelessWidget {
+  final WorkoutClass workoutClass;
+  final int classIndex;
+
+  const ClassDetailScreen({
+    super.key,
+    required this.workoutClass,
+    required this.classIndex,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(workoutClass.name)),
+      body: ListView.builder(
+        padding: const EdgeInsets.all(16),
+        itemCount: workoutClass.blocks.length,
+        itemBuilder: (context, index) {
+          final block = workoutClass.blocks[index];
+          return Card(
+            margin: const EdgeInsets.only(bottom: 16),
+            child: InkWell(                     // ← Hace todo el card clickeable
+              onTap: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => LiveTimerScreen(
+                      workoutClass: workoutClass,
+                      startFromBlock: index,      // ← Inicia desde este bloque
+                    ),
+                  ),
+                );
+              },
+              borderRadius: BorderRadius.circular(12),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Encabezado del bloque
+                    Row(
+                      children: [
+                        CircleAvatar(
+                          backgroundColor: Colors.deepOrange,
+                          radius: 18,
+                          child: Text("${index + 1}", style: const TextStyle(fontWeight: FontWeight.bold)),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(block.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                              Text(
+                                "${block.durationMinutes} min • ${block.rounds} rondas",
+                                style: const TextStyle(color: Colors.grey),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Icon(Icons.play_arrow, color: Colors.deepOrange),
+                      ],
+                    ),
+
+                    const SizedBox(height: 12),
+
+                    // Lista de ejercicios
+                    if (block.exercises.isNotEmpty) ...[
+                      const Text("Ejercicios:", style: TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 6),
+                      ...block.exercises.map((exercise) => Padding(
+                            padding: const EdgeInsets.only(left: 8, bottom: 4),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.fiber_manual_record, size: 8, color: Colors.grey),
+                                const SizedBox(width: 8),
+                                Expanded(child: Text(exercise, style: const TextStyle(fontSize: 16))),
+                              ],
+                            ),
+                          )),
+                    ] else
+                      const Text("No hay ejercicios configurados", 
+                          style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic)),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+      bottomNavigationBar: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Expanded(
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.edit),
+                label: const Text("Editar Clase"),
+                onPressed: () {
+                  Navigator.pushReplacement(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => ClassBuilderScreen(
+                        existingClass: workoutClass,
+                        classIndex: classIndex,
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ElevatedButton.icon(
+                icon: const Icon(Icons.copy),
+                label: const Text("Duplicar"),
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.grey[700]),
+                onPressed: () async {
+                  final duplicated = WorkoutClass(
+                    name: "${workoutClass.name} (Copia)",
+                    blocks: workoutClass.blocks.map((b) => WorkoutBlock(
+                      name: b.name,
+                      durationMinutes: b.durationMinutes,
+                      blockType: b.blockType,
+                      exercises: List.from(b.exercises),
+                      rounds: b.rounds,
+                      workMinutes: b.workMinutes,
+                      workSeconds: b.workSeconds,
+                      restMinutes: b.restMinutes,
+                      restSeconds: b.restSeconds,
+                    )).toList(),
+                  );
+
+                  List<WorkoutClass> all = await ClassStorageService.loadClasses();
+                  all.add(duplicated);
+                  await ClassStorageService.saveClasses(all);
+
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("✅ Clase duplicada")),
+                  );
+                  Navigator.pop(context);
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ==================== LIVE TIMER SCREEN - VERSIÓN ESTABLE Y RESPONSIVA ====================
 class LiveTimerScreen extends StatefulWidget {
   final WorkoutClass workoutClass;
-  const LiveTimerScreen({super.key, required this.workoutClass});
+  final int startFromBlock;
+
+  const LiveTimerScreen({
+    super.key,
+    required this.workoutClass,
+    this.startFromBlock = 0,
+  });
 
   @override
   State<LiveTimerScreen> createState() => _LiveTimerScreenState();
 }
 
 class _LiveTimerScreenState extends State<LiveTimerScreen> {
+  bool isFullscreen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final timer = Provider.of<WorkoutTimerService>(context, listen: false);
+      timer.startClass(widget.workoutClass, startFromBlock: widget.startFromBlock);
+    });
+  }
+
+  @override
+  void dispose() {
+    final timer = Provider.of<WorkoutTimerService>(context, listen: false);
+    timer.pauseTimer();
+    timer.finishClass();
+    SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+    super.dispose();
+  }
+
+  void toggleFullscreen() {
+    setState(() => isFullscreen = !isFullscreen);
+  }
+
   @override
   Widget build(BuildContext context) {
     final timer = Provider.of<WorkoutTimerService>(context);
     final block = timer.currentBlock;
+    final size = MediaQuery.of(context).size;
+    final isSmallScreen = size.width < 600;
 
     String formatTime(int seconds) {
       int min = seconds ~/ 60;
@@ -431,74 +930,307 @@ class _LiveTimerScreenState extends State<LiveTimerScreen> {
       return '${min.toString().padLeft(2, '0')}:${sec.toString().padLeft(2, '0')}';
     }
 
+    // Tamaños responsivos
+    final bool bigMode = isFullscreen;
+    final double timerFontSize = bigMode 
+        ? (isSmallScreen ? 165 : 240) 
+        : (isSmallScreen ? 125 : 170);
+
+    final double phaseFontSize = bigMode 
+        ? (isSmallScreen ? 36 : 48) 
+        : (isSmallScreen ? 28 : 34);
+
+    final double blockNameSize = bigMode 
+        ? (isSmallScreen ? 32 : 42) 
+        : 26;
+
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: AppBar(title: Text(widget.workoutClass.name)),
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            children: [
-              Text("Bloque ${timer.currentBlockIndex + 1}/${widget.workoutClass.blocks.length}"),
-              Text(block?.name ?? "", style: const TextStyle(fontSize: 26, fontWeight: FontWeight.bold)),
-
-              const Spacer(),
-
-              if (timer.isPreparingNext)
-                Column(
-                  children: [
-                    const Text("¡PREPÁRATE!", style: TextStyle(fontSize: 36, fontWeight: FontWeight.bold, color: Colors.orange)),
-                    Text("${timer.prepareSeconds}", style: const TextStyle(fontSize: 140, fontWeight: FontWeight.bold, color: Colors.orange)),
-                  ],
-                )
-              else
-                Column(
-                  children: [
-                    Text(
-                      timer.isWorkPhase ? "TRABAJANDO" : "DESCANSANDO",
-                      style: TextStyle(fontSize: 32, fontWeight: FontWeight.bold, color: timer.isWorkPhase ? Colors.green : Colors.orange),
-                    ),
-                    Text(
-                      formatTime(timer.remainingSeconds),
-                      style: const TextStyle(fontSize: 135, fontWeight: FontWeight.bold, color: Colors.deepOrange),
-                    ),
-                  ],
-                ),
-
-              const SizedBox(height: 20),
-              Text("Ronda ${timer.currentRound} de ${block?.rounds ?? 1}", style: const TextStyle(fontSize: 24)),
-
-              if (block?.exercises.isNotEmpty ?? false)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 20),
-                  child: Text(block!.exercises.join(" • "), style: const TextStyle(fontSize: 18, color: Colors.white70)),
-                ),
-
-              const Spacer(),
-
-              Row(
+      appBar: isFullscreen ? null : AppBar(title: Text(widget.workoutClass.name)),
+      
+      body: SafeArea(   // ← Importante para evitar problemas de tamaño
+        child: GestureDetector(
+          onDoubleTap: toggleFullscreen,
+          child: Container(
+            width: double.infinity,
+            height: double.infinity,
+            color: Colors.black,
+            child: Padding(
+              padding: EdgeInsets.all(bigMode ? 16 : 24),
+              child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  ElevatedButton.icon(
-                    onPressed: () {
-                      if (!timer.isRunning) timer.startClass(widget.workoutClass);
-                      else if (timer.isPaused) timer.resumeTimer();
-                      else timer.pauseTimer();
-                    },
-                    icon: Icon(timer.isRunning && !timer.isPaused ? Icons.pause : Icons.play_arrow),
-                    label: Text(timer.isRunning && !timer.isPaused ? "Pausar" : "Iniciar"),
-                    style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
+                  if (!isFullscreen)
+                    Text(
+                      "Bloque ${timer.currentBlockIndex + 1}/${widget.workoutClass.blocks.length}",
+                      style: const TextStyle(fontSize: 18, color: Colors.grey),
+                    ),
+
+                  Text(
+                    block?.name ?? "",
+                    style: TextStyle(fontSize: blockNameSize, fontWeight: FontWeight.bold),
+                    textAlign: TextAlign.center,
                   ),
-                  const SizedBox(width: 16),
-                  ElevatedButton.icon(
-                    onPressed: timer.restartCurrentBlock,
-                    icon: const Icon(Icons.restart_alt),
-                    label: const Text("Reiniciar Bloque"),
+
+                  const SizedBox(height: 40),
+
+                  if (timer.isPreparingNext)
+                    Column(
+                      children: [
+                        const Text("¡PREPÁRATE!", style: TextStyle(fontSize: 42, color: Colors.orange, fontWeight: FontWeight.bold)),
+                        Text("${timer.prepareSeconds}", style: TextStyle(fontSize: timerFontSize, color: Colors.orange, fontWeight: FontWeight.bold)),
+                      ],
+                    )
+                  else
+                    Column(
+                      children: [
+                        Text(
+                          timer.isWorkPhase ? "TRABAJANDO" : "DESCANSANDO",
+                          style: TextStyle(
+                            fontSize: phaseFontSize,
+                            fontWeight: FontWeight.bold,
+                            color: timer.isWorkPhase ? Colors.greenAccent : Colors.orangeAccent,
+                          ),
+                        ),
+                        Text(
+                          formatTime(timer.remainingSeconds),
+                          style: TextStyle(
+                            fontSize: timerFontSize,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.deepOrange,
+                          ),
+                        ),
+                      ],
+                    ),
+
+                  const SizedBox(height: 30),
+
+                  Text(
+                    "Ronda ${timer.currentRound} de ${block?.rounds ?? 1}",
+                    style: TextStyle(fontSize: bigMode ? 32 : 24, color: Colors.white),
+                    textAlign: TextAlign.center,
                   ),
+
+                  if (block?.exercises.isNotEmpty ?? false)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 30),
+                      child: Text(
+                        block!.exercises.join(" • "),
+                        style: TextStyle(fontSize: bigMode ? 20 : 18, color: Colors.white70),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+
+                  const Spacer(),
+
+                  if (!isFullscreen)
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            final t = Provider.of<WorkoutTimerService>(context, listen: false);
+                            if (!t.isRunning) {
+                              t.startClass(widget.workoutClass, startFromBlock: widget.startFromBlock);
+                            } else if (t.isPaused) {
+                              t.resumeTimer();
+                            } else {
+                              t.pauseTimer();
+                            }
+                          },
+                          icon: Icon(timer.isRunning && !timer.isPaused ? Icons.pause : Icons.play_arrow),
+                          label: Text(timer.isRunning && !timer.isPaused ? "Pausar" : "Iniciar"),
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.deepOrange),
+                        ),
+                        const SizedBox(width: 16),
+                        ElevatedButton.icon(
+                          onPressed: timer.restartCurrentBlock,
+                          icon: const Icon(Icons.restart_alt),
+                          label: const Text("Reiniciar Bloque"),
+                        ),
+                      ],
+                    ),
+
+                  if (isFullscreen)
+                    const Text("Doble tap para salir del modo TV",
+                        style: TextStyle(color: Colors.grey, fontSize: 16)),
                 ],
               ),
-            ],
+            ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ==================== IMPORTAR RUTINA CON IA (PARSER) ====================
+class ImportRoutineScreen extends StatefulWidget {
+  const ImportRoutineScreen({super.key});
+  @override
+  State<ImportRoutineScreen> createState() => _ImportRoutineScreenState();
+}
+
+class _ImportRoutineScreenState extends State<ImportRoutineScreen> {
+  final TextEditingController _textController = TextEditingController();
+  bool isProcessing = false;
+
+  void _parseAndCreateClass() async {
+    if (_textController.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Pega una rutina primero")));
+      return;
+    }
+
+    setState(() => isProcessing = true);
+
+    // Parser inteligente
+    final workout = _parseWorkoutText(_textController.text);
+
+    setState(() => isProcessing = false);
+
+    if (workout.blocks.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("No se pudieron detectar bloques")));
+      return;
+    }
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ClassBuilderScreen(existingClass: workout),
+      ),
+    );
+  }
+
+      WorkoutClass _parseWorkoutText(String text) {
+    final lines = text.split('\n')
+        .map((l) => l.trim())
+        .where((l) => l.isNotEmpty)
+        .toList();
+
+    String className = "Rutina Importada";
+    List<WorkoutBlock> blocks = [];
+    List<String> currentExercises = [];
+    String currentBlockName = "Bloque Principal";
+    BlockType currentType = BlockType.metcon;
+
+    for (String line in lines) {
+      String upper = line.toUpperCase();
+
+      // === DETECTAR NOMBRE DE LA CLASE ===
+      if (upper.contains("LUNES") || upper.contains("MARTES") || upper.contains("MIÉRCOLES") ||
+          upper.contains("JUEVES") || upper.contains("VIERNES") || upper.contains("SÁBADO") || 
+          upper.contains("DOMINGO") || upper.contains("FECHA")) {
+        className = line.replaceAll(RegExp(r'header image|Programación Lion Master', caseSensitive: false), "").trim();
+        continue;
+      }
+
+      // === DETECTAR NUEVO BLOQUE ===
+      if (upper.contains("WARM UP") || upper.contains("ACTIVACIÓN") || upper.contains("CALENTAMIENTO") ||
+          upper.contains("BLOQUE") || upper.contains("FUERZA") || upper.contains("HIPERTROFIA") ||
+          upper.contains("WEIGHTLIFTING") || upper.contains("STRENGTH") || upper.contains("CONDITIONING") ||
+          upper.contains("WOD") || upper.contains("GYMNASTICS") || upper.contains("FINISHER") ||
+          upper.contains("ACCESSORY") || upper.contains("DENSIDAD") || upper.contains("CIERRE")) {
+
+        // Guardar bloque anterior
+        if (currentExercises.isNotEmpty && currentBlockName.isNotEmpty) {
+          blocks.add(WorkoutBlock(
+            name: currentBlockName,
+            durationMinutes: 12, // valor por defecto
+            blockType: currentType,
+            exercises: List.from(currentExercises),
+            rounds: 4,
+            workMinutes: 3,
+            workSeconds: 0,
+            restMinutes: 1,
+            restSeconds: 0,
+          ));
+        }
+
+        currentBlockName = line;
+        currentExercises = [];
+
+        // Detectar tipo de bloque
+        if (upper.contains("WARM UP") || upper.contains("ACTIVACIÓN") || upper.contains("CALENTAMIENTO")) {
+          currentType = BlockType.warmUp;
+        } else if (upper.contains("FUERZA") || upper.contains("STRENGTH") || upper.contains("WEIGHTLIFTING")) {
+          currentType = BlockType.strength;
+        } else if (upper.contains("HIPERTROFIA")) {
+          currentType = BlockType.strength;
+        } else {
+          currentType = BlockType.metcon;
+        }
+
+        continue;
+      }
+
+      // Agregar ejercicio o descripción
+      if (line.isNotEmpty) {
+        currentExercises.add(line);
+      }
+    }
+
+    // Agregar el último bloque
+    if (currentExercises.isNotEmpty) {
+      blocks.add(WorkoutBlock(
+        name: currentBlockName,
+        durationMinutes: 12,
+        blockType: currentType,
+        exercises: List.from(currentExercises),
+        rounds: 4,
+        workMinutes: 3,
+        workSeconds: 0,
+        restMinutes: 1,
+        restSeconds: 0,
+      ));
+    }
+
+    // Si no detectó nada, crear un bloque genérico
+    if (blocks.isEmpty) {
+      blocks.add(WorkoutBlock(
+        name: "Bloque Principal",
+        durationMinutes: 30,
+        blockType: BlockType.metcon,
+        exercises: lines,
+      ));
+    }
+
+    return WorkoutClass(name: className, blocks: blocks);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Importar Rutina')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            const Text("Pega aquí tu rutina completa:", style: TextStyle(fontSize: 16)),
+            const SizedBox(height: 10),
+            Expanded(
+              child: TextField(
+                controller: _textController,
+                maxLines: null,
+                expands: true,
+                decoration: const InputDecoration(
+                  hintText: "Ejemplo:\nVIERNES: CUÁDRICEPS\nACTIVACIÓN. 3 vueltas\nSentadilla x15\n...",
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              icon: isProcessing ? const CircularProgressIndicator(color: Colors.white) : const Icon(Icons.auto_awesome),
+              label: Text(isProcessing ? "Procesando..." : "Procesar Rutina con IA"),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.deepOrange,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                minimumSize: const Size(double.infinity, 56),
+              ),
+              onPressed: isProcessing ? null : _parseAndCreateClass,
+            ),
+          ],
         ),
       ),
     );
